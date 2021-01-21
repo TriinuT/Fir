@@ -86,8 +86,51 @@ typedef struct Feedback { // (3)
   uint16_t delimiter;
 } Feedback;
 
+typedef struct Motor { // (4)
+  int16_t kP;
+  int16_t kI;
+  int32_t errorSum;
+  int16_t prev_position;
+  int16_t position_change;
+  int16_t setpoint;
+} Motor;
+
+int32_t clamp(int32_t value, int32_t minValue, int32_t maxValue) {
+  if (value > maxValue) {
+    return maxValue;
+  }
+
+  if (value < minValue) {
+    return minValue;
+  }
+
+  return value;
+}
+
+
+Motor motor1 = {.kP = 9000, .kI = 10, .prev_position = 0, .errorSum = 0};
+Motor motor2 = {.kP = 9000, .kI = 10, .prev_position = 0, .errorSum = 0};
+Motor motor3 = {.kP = 9000, .kI = 10, .prev_position = 0, .errorSum = 0};
+
 Command command = {.speed1 = 0, .speed2 = 0, .speed3 = 0, .throwerSpeed = 0, .delimiter = 0}; // (4)
 volatile uint8_t isCommandReceived = 0; // (5)
+
+int32_t pid_controller(Motor* motor, int16_t position) {
+  motor->position_change = position - motor->prev_position;
+  int16_t error = motor->setpoint - motor->position_change;
+
+  motor->prev_position = position;
+
+  if (motor->setpoint == 0) {
+    motor->errorSum = 0;
+  } else {
+    int32_t maxErrorSum = 65535 / motor->kI;
+    motor->errorSum += error;
+    motor->errorSum = clamp(motor->errorSum, -maxErrorSum, maxErrorSum);
+  }
+
+  return motor->kP * error + motor->kI * motor->errorSum;
+}
 
 void CDC_On_Receive(uint8_t* buffer, uint32_t* length) { // (6)
   if (*length == sizeof(Command)) { // (7)
@@ -98,10 +141,44 @@ void CDC_On_Receive(uint8_t* buffer, uint32_t* length) { // (6)
     }
   }
 }
+
 void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim) {
   // Motor control calculations can be called from here
+  int32_t pwm1 = pid_controller(&motor1, TIM1->CNT);
+  int32_t pwm2 = pid_controller(&motor2, TIM3->CNT);
+  int32_t pwm3 = pid_controller(&motor3, TIM4->CNT);
+
+  pwm1 = clamp(pwm1, -65535, 65535);
+  pwm2 = clamp(pwm2, -65535, 65535);
+  pwm3 = clamp(pwm3, -65535, 65535);
+
+  if (pwm1 > 0) {
+    TIM2->CCR1 = pwm1;
+    TIM2->CCR2 = 0;
+  } else {
+    TIM2->CCR1 = 0;
+    TIM2->CCR2 = -pwm1;
+  }
+
+  if (pwm2 > 0) {
+    TIM2->CCR3 = pwm2;
+    TIM2->CCR4 = 0;
+  } else {
+    TIM2->CCR3 = 0;
+    TIM2->CCR4 = -pwm2;
+  }
+
+  if (pwm3 > 0) {
+    TIM16->CCR1 = pwm3;
+    TIM17->CCR1 = 0;
+  } else {
+    TIM16->CCR1 = 0;
+    TIM17->CCR1 = -pwm3;
+  }
+
 }
 /* USER CODE END 0 */
+
 
 /**
   * @brief  The application entry point.
@@ -154,7 +231,7 @@ int main(void)
   HAL_TIM_PWM_Start(&htim16, TIM_CHANNEL_1);
   HAL_TIM_PWM_Start(&htim17, TIM_CHANNEL_1);
 
-
+  HAL_TIM_Base_Start_IT(&htim6);
 
   Feedback feedback = { // (1)
         .speed1 = 0,
@@ -175,36 +252,14 @@ int main(void)
       isCommandReceived = 0;
       HAL_GPIO_TogglePin(LED_GPIO_Port, LED_Pin); // (3)
 
-      if (command.speed1 > 0){
-        TIM2->CCR1 = command.speed1;
-        TIM2->CCR2 = 0;
-      }
-      else {
-        TIM2->CCR1 = 0;
-        TIM2->CCR2 = -command.speed1;
-      }
+      feedback.speed1 = motor1.position_change;
+      feedback.speed2 = motor2.position_change;
+      feedback.speed3 = motor3.position_change;
 
-      if (command.speed2 > 0){
-         TIM2->CCR3 = command.speed2;
-         TIM2->CCR4 = 0;
-       }
-       else {
-         TIM2->CCR3 = 0;
-         TIM2->CCR4 = -command.speed2;
-       }
+      motor1.setpoint = command.speed1;
+      motor2.setpoint = command.speed2;
+      motor3.setpoint = command.speed3;
 
-      if (command.speed3 > 0){
-         TIM16->CCR1 = command.speed3;
-         TIM17->CCR1 = 0;
-       }
-       else {
-         TIM16->CCR1 = 0;
-         TIM17->CCR1 = -command.speed3;
-       }
-
-      feedback.speed1 = TIM1->CNT;
-      feedback.speed2 = TIM3->CNT;
-      feedback.speed3 = TIM4->CNT;
 
       CDC_Transmit_FS(&feedback, sizeof(feedback)); // (5)
       //HAL_Delay(1000);
