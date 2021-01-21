@@ -49,6 +49,7 @@ TIM_HandleTypeDef htim6;
 TIM_HandleTypeDef htim8;
 TIM_HandleTypeDef htim16;
 TIM_HandleTypeDef htim17;
+DMA_HandleTypeDef hdma_tim8_ch1;
 
 /* USER CODE BEGIN PV */
 
@@ -57,6 +58,7 @@ TIM_HandleTypeDef htim17;
 /* Private function prototypes -----------------------------------------------*/
 void SystemClock_Config(void);
 static void MX_GPIO_Init(void);
+static void MX_DMA_Init(void);
 static void MX_TIM1_Init(void);
 static void MX_TIM2_Init(void);
 static void MX_TIM3_Init(void);
@@ -107,6 +109,7 @@ int32_t clamp(int32_t value, int32_t minValue, int32_t maxValue) {
   return value;
 }
 
+uint16_t throwerDShotPWMs[20] = {0};
 
 Motor motor1 = {.kP = 9000, .kI = 10, .prev_position = 0, .errorSum = 0};
 Motor motor2 = {.kP = 9000, .kI = 10, .prev_position = 0, .errorSum = 0};
@@ -114,6 +117,27 @@ Motor motor3 = {.kP = 9000, .kI = 10, .prev_position = 0, .errorSum = 0};
 
 Command command = {.speed1 = 0, .speed2 = 0, .speed3 = 0, .throwerSpeed = 0, .delimiter = 0}; // (4)
 volatile uint8_t isCommandReceived = 0; // (5)
+
+void updateDShot(uint16_t throttle) {
+  uint16_t packet = throttle << 1;
+
+  // compute checksum
+  int csum = 0;
+  int csum_data = packet;
+
+  for (int i = 0; i < 3; i++) {
+    csum ^= csum_data;   // xor data by nibbles
+    csum_data >>= 4;
+  }
+
+  csum &= 0xf;
+  // append checksum
+  packet = (packet << 4) | csum;
+
+  for (int i = 0; i < 16; i++) {
+    throwerDShotPWMs[15 - i] = packet & (1 << i) ? 800 : 400;
+  }
+}
 
 int32_t pid_controller(Motor* motor, int16_t position) {
   motor->position_change = position - motor->prev_position;
@@ -179,7 +203,6 @@ void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim) {
 }
 /* USER CODE END 0 */
 
-
 /**
   * @brief  The application entry point.
   * @retval int
@@ -208,6 +231,7 @@ int main(void)
 
   /* Initialize all configured peripherals */
   MX_GPIO_Init();
+  MX_DMA_Init();
   MX_TIM1_Init();
   MX_TIM2_Init();
   MX_TIM3_Init();
@@ -232,6 +256,10 @@ int main(void)
   HAL_TIM_PWM_Start(&htim17, TIM_CHANNEL_1);
 
   HAL_TIM_Base_Start_IT(&htim6);
+
+  updateDShot(0);
+
+  HAL_TIM_PWM_Start_DMA(&htim8, TIM_CHANNEL_1, throwerDShotPWMs, sizeof(throwerDShotPWMs) / sizeof(uint16_t));
 
   Feedback feedback = { // (1)
         .speed1 = 0,
@@ -260,6 +288,7 @@ int main(void)
       motor2.setpoint = command.speed2;
       motor3.setpoint = command.speed3;
 
+      updateDShot(command.throwerSpeed);
 
       CDC_Transmit_FS(&feedback, sizeof(feedback)); // (5)
       //HAL_Delay(1000);
@@ -603,7 +632,7 @@ static void MX_TIM8_Init(void)
   htim8.Instance = TIM8;
   htim8.Init.Prescaler = 0;
   htim8.Init.CounterMode = TIM_COUNTERMODE_UP;
-  htim8.Init.Period = 65535;
+  htim8.Init.Period = 1066;
   htim8.Init.ClockDivision = TIM_CLOCKDIVISION_DIV1;
   htim8.Init.RepetitionCounter = 0;
   htim8.Init.AutoReloadPreload = TIM_AUTORELOAD_PRELOAD_DISABLE;
@@ -776,6 +805,23 @@ static void MX_TIM17_Init(void)
 
   /* USER CODE END TIM17_Init 2 */
   HAL_TIM_MspPostInit(&htim17);
+
+}
+
+/**
+  * Enable DMA controller clock
+  */
+static void MX_DMA_Init(void)
+{
+
+  /* DMA controller clock enable */
+  __HAL_RCC_DMAMUX1_CLK_ENABLE();
+  __HAL_RCC_DMA1_CLK_ENABLE();
+
+  /* DMA interrupt init */
+  /* DMA1_Channel1_IRQn interrupt configuration */
+  HAL_NVIC_SetPriority(DMA1_Channel1_IRQn, 0, 0);
+  HAL_NVIC_EnableIRQ(DMA1_Channel1_IRQn);
 
 }
 
